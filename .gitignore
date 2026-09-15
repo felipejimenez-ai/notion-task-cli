@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+
+# Environment and credentials
+.env
+credentials.json
+token.json
+
+# Temporary artifacts
+.tmp/*
+!.tmp/.gitkeep
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/*.log
