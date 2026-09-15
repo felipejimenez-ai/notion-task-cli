@@ -1,7 +1,7 @@
 """Run deterministic task refresh pipeline in one command.
 
 Pipeline:
-1) Optional normalize: mcp_fetch_tasks.py (when MCP payload is provided)
+1) Optional fetch + normalize: notion_task_manager.py export-source
 2) Generate report: organize_notion_tasks.py --validate
 3) Regression validation: validate_task_report.py (with optional --strict)
 4) Optional mutation mode: batch_update_descriptions.py
@@ -256,25 +256,33 @@ def main() -> int:
 
     # Contract validation and mode fallback resolution.
     if args.mode == "direct-api":
-        api_pages_path = Path(".tmp/reports/api-pages.json")
-        # Attempt direct API fetch
-        fetch_cmd = [
+        # Attempt direct API fetch + normalize in one step via notion_task_manager.
+        export_cmd = [
             sys.executable,
-            "tools/api_fetch_tasks.py",
+            "tools/notion_task_manager.py",
+            "export-source",
             "--database-id",
             args.database_id,
             "--output",
-            str(api_pages_path),
+            str(source_path),
+            "--cache-file",
+            str(cache_path),
             "--page-size",
             str(args.page_size),
         ]
         if args.max_pages is not None:
-            fetch_cmd.extend(["--max-pages", str(args.max_pages)])
-        
-        fetch_result = run_cmd(fetch_cmd)
-        steps.append({"step": "fetch", **fetch_result})
-        
-        if fetch_result["returncode"] != 0:
+            export_cmd.extend(["--max-pages", str(args.max_pages)])
+        if args.delta:
+            export_cmd.append("--delta")
+        if args.force_full:
+            export_cmd.append("--force-full")
+        for status in args.exclude_status:
+            export_cmd.extend(["--exclude-status", status])
+
+        export_result = run_cmd(export_cmd)
+        steps.append({"step": "fetch", **export_result})
+
+        if export_result["returncode"] != 0:
             # API fetch failed; check if fallback is allowed
             if not args.allow_fallback_mcp:
                 print(
@@ -299,8 +307,8 @@ def main() -> int:
             fallback_used = "direct-api->mcp-live"
             steps.pop()
         else:
-            # API fetch succeeded; use it as MCP input for normalization
-            args.mcp_input = str(api_pages_path)
+            # export-source succeeded — tasks-source.json is ready, skip normalize step.
+            args.mcp_input = None
 
     if mode_used == "mcp-live" and not args.mcp_input:
         if args.allow_fallback_local and source_path.exists() and fallback_used is None:
@@ -327,10 +335,11 @@ def main() -> int:
         )
 
     # Optional source normalization from fetched payload.
-    if args.mcp_input and mode_used in {"mcp-live", "mcp-local", "direct-api"}:
+    if args.mcp_input and mode_used in {"mcp-live", "mcp-local"}:
         normalize_cmd = [
             sys.executable,
-            "tools/mcp_fetch_tasks.py",
+            "tools/notion_task_manager.py",
+            "export-source",
             "--input",
             args.mcp_input,
             "--output",

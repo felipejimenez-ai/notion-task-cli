@@ -10,8 +10,7 @@ Fetch current tasks from Notion (Direct API by default), normalize the data, and
 - Priority labels and task metadata already stored in Notion
 
 ## Tools Used
-- Notion API (direct): `tools/api_fetch_tasks.py` — **NEW: Recommended for daily use**
-- Notion MCP (legacy): `tools/mcp_fetch_tasks.py`
+- `tools/notion_task_manager.py export-source` — fetch + normalize (replaces archived api_fetch/mcp_fetch scripts)
 - `python tools/organize_notion_tasks.py --source-file .tmp/reports/tasks-source.json --output .tmp/reports/tasks-organized.md --validate`
 - `python tools/validate_task_report.py --current .tmp/reports/tasks-organized.md`
 - `python tools/refresh_tasks.py` — Unified orchestrator for all modes
@@ -38,7 +37,7 @@ python tools/refresh_tasks.py --mode mcp-local --delta
 1. Use Notion MCP to read the live tasks database and data source metadata.
 2. Collect task page payloads from the tasks data source and save raw JSON at `.tmp/reports/mcp-pages.json`.
 3. Normalize raw payloads into `.tmp/reports/tasks-source.json` by running:
-   - `python tools/mcp_fetch_tasks.py --input .tmp/reports/mcp-pages.json --output .tmp/reports/tasks-source.json`
+   - `python tools/notion_task_manager.py export-source --input .tmp/reports/mcp-pages.json --output .tmp/reports/tasks-source.json`
 4. Ensure normalized source contains keys:
    - `name`
    - `url`

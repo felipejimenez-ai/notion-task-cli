@@ -1,4 +1,4 @@
-"""Notion Task Manager — CRUD operations for Notion tasks via CLI.
+"""Notion Task Manager — CRUD + export operations for Notion tasks via CLI.
 
 Talks directly to the Notion REST API. No MCP, no middleware.
 Supports natural names (task name, project name) instead of UUIDs.
@@ -9,6 +9,7 @@ Usage:
     python tools/notion_task_manager.py update "Task name" --set-status done
     python tools/notion_task_manager.py delete "Task name"
     python tools/notion_task_manager.py sync
+    python tools/notion_task_manager.py export-source --delta
 """
 
 from __future__ import annotations
@@ -245,20 +246,30 @@ class NotionClient:
         payload = {"archived": True}
         return self._request("PATCH", f"{NOTION_API_BASE}/pages/{page_id}", payload)
 
-    def query_database(self, filter_obj: dict[str, Any] | None = None, sorts: list[dict] | None = None) -> list[dict[str, Any]]:
+    def query_database(
+        self,
+        filter_obj: dict[str, Any] | None = None,
+        sorts: list[dict] | None = None,
+        page_size: int = 100,
+        max_pages: int | None = None,
+    ) -> list[dict[str, Any]]:
         url = f"{NOTION_API_BASE}/databases/{self.database_id}/query"
-        payload: dict[str, Any] = {}
+        payload: dict[str, Any] = {"page_size": min(page_size, 100)}
         if filter_obj:
             payload["filter"] = filter_obj
         if sorts:
             payload["sorts"] = sorts
-        all_results = []
-        cursor = None
+        all_results: list[dict[str, Any]] = []
+        cursor: str | None = None
+        page_count = 0
         while True:
             if cursor:
                 payload["start_cursor"] = cursor
             data = self._request("POST", url, payload)
             all_results.extend(data.get("results", []))
+            page_count += 1
+            if max_pages and page_count >= max_pages:
+                break
             cursor = data.get("next_cursor")
             if not cursor:
                 break
@@ -650,6 +661,224 @@ def sync_tasks() -> dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# EXPORT-SOURCE — produces tasks-source.json for the report pipeline
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _extract_notion_api_value(prop_obj: Any) -> Any:
+    """Extract a plain value from a Notion API property object."""
+    if not isinstance(prop_obj, dict):
+        return None
+    prop_type = prop_obj.get("type")
+    extractor = EXTRACTORS.get(prop_type)
+    if not extractor:
+        return None
+    return extractor(prop_obj)
+
+
+def _extract_properties_for_export(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Unwrap various page shapes into a flat property dict."""
+    # Already flat / pre-normalized.
+    if "name" in item and ("status" in item or "today" in item):
+        return item
+
+    properties = item.get("properties")
+    if not isinstance(properties, dict):
+        return None
+
+    # Notion API format: values are {type: ..., <type>: ...} objects.
+    has_type_fields = any(isinstance(v, dict) and "type" in v for v in properties.values())
+    if has_type_fields:
+        return {key: _extract_notion_api_value(value) for key, value in properties.items()}
+
+    # Already flat.
+    return properties
+
+
+def _normalize_task_for_export(properties: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize a flat property dict into the tasks-source.json schema."""
+    def _clean(v: Any) -> str:
+        return " ".join(str(v or "").strip().split())
+
+    def _clean_or_none(v: Any) -> str | None:
+        s = _clean(v)
+        return s if s else None
+
+    name = _clean(properties.get("name"))
+    if not name:
+        return None
+
+    status = str(properties.get("status", "")).strip().lower() or "to-do"
+    today_raw = str(properties.get("today", "")).strip().lower()
+    today = "__YES__" if today_raw in {"__yes__", "yes", "true", "1"} else "__NO__"
+
+    deadline_raw = (
+        properties.get("deadline")
+        or properties.get("due")
+        or properties.get("date:deadline:start")
+        or properties.get("date:deadine:start")
+    )
+    deadline = _clean(deadline_raw)[:10] if deadline_raw else None
+    if deadline == "":
+        deadline = None
+
+    task: dict[str, Any] = {
+        "name": name,
+        "url": str(properties.get("url", "")).strip(),
+        "status": status,
+        "today": today,
+    }
+    for key in ("description", "project", "impact", "category"):
+        val = _clean_or_none(properties.get(key))
+        if val:
+            task[key] = val
+    if deadline:
+        task["deadline"] = deadline
+
+    seq = properties.get("sequence")
+    if seq is not None:
+        try:
+            task["sequence"] = float(seq)
+        except (TypeError, ValueError):
+            pass
+
+    return task
+
+
+def _export_source_fingerprint(tasks: list[dict[str, Any]]) -> str:
+    import hashlib
+    def _task_key(t: dict[str, Any]) -> str:
+        return str(t.get("url") or t.get("name") or "").strip().lower()
+    def _task_fp(t: dict[str, Any]) -> str:
+        blob = json.dumps(t, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    keyed = sorted(((_task_key(t), _task_fp(t)) for t in tasks), key=lambda x: x[0])
+    blob = json.dumps(keyed, ensure_ascii=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def _load_export_cache(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _write_export_cache(path: Path, source_fp: str, tasks: list[dict[str, Any]]) -> None:
+    import hashlib
+    def _task_key(t: dict[str, Any]) -> str:
+        return str(t.get("url") or t.get("name") or "").strip().lower()
+    def _task_fp(t: dict[str, Any]) -> str:
+        blob = json.dumps(t, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+    task_map: dict[str, str] = {}
+    for t in tasks:
+        k = _task_key(t)
+        if k:
+            task_map[k] = _task_fp(t)
+    cache = {
+        "version": 1,
+        "source_fingerprint": source_fp,
+        "task_fingerprints": task_map,
+        "tasks": len(tasks),
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cache, indent=2) + "\n", encoding="utf-8")
+
+
+def export_source(
+    client: NotionClient | None = None,
+    input_file: str | None = None,
+    output_file: str = ".tmp/reports/tasks-source.json",
+    cache_file: str = ".tmp/reports/tasks-cache.json",
+    delta: bool = False,
+    force_full: bool = False,
+    exclude_status: list[str] | None = None,
+    page_size: int = 100,
+    max_pages: int | None = None,
+) -> dict[str, Any]:
+    """Fetch and normalize tasks into tasks-source.json.
+
+    * With *input_file*: normalises an existing JSON payload (API pages or MCP export).
+    * Without *input_file*: queries the Notion database via *client*.
+    """
+    excluded = {s.strip().lower() for s in (exclude_status or ["done"]) if s.strip()}
+
+    # ── Step 1: obtain raw page list ──────────────────────────────────────────
+    if input_file:
+        path = Path(input_file)
+        if not path.exists():
+            return {"ok": False, "error": f"input file not found: {path}"}
+        raw_items: list[dict[str, Any]] = json.loads(path.read_text(encoding="utf-8"))
+    elif client is not None:
+        pages = client.query_database(page_size=page_size, max_pages=max_pages)
+        raw_items = [
+            {
+                "id": p.get("id"),
+                "url": f"https://www.notion.so/{p.get('id', '').replace('-', '')}",
+                "properties": p.get("properties", {}),
+            }
+            for p in pages
+        ]
+    else:
+        return {"ok": False, "error": "either input_file or NotionClient required"}
+
+    if not isinstance(raw_items, list):
+        return {"ok": False, "error": "input must be a JSON array"}
+
+    # ── Step 2: normalize ─────────────────────────────────────────────────────
+    normalized: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        props = _extract_properties_for_export(item)
+        if not props:
+            continue
+        task = _normalize_task_for_export(props)
+        if not task:
+            continue
+        if task["status"] in excluded:
+            continue
+        key = (task.get("url") or task["name"].lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(task)
+
+    # ── Step 3: delta cache ───────────────────────────────────────────────────
+    source_fp = _export_source_fingerprint(normalized)
+    cache = _load_export_cache(Path(cache_file))
+    previous_fp = str(cache.get("source_fingerprint", ""))
+    changed = True
+    if delta and not force_full and previous_fp == source_fp:
+        changed = False
+
+    # ── Step 4: write output ──────────────────────────────────────────────────
+    out = Path(output_file)
+    if changed or not out.exists():
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(normalized, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+    if delta or force_full:
+        _write_export_cache(Path(cache_file), source_fp, normalized)
+
+    return {
+        "ok": True,
+        "input": input_file,
+        "output": str(out),
+        "tasks": len(normalized),
+        "changed": changed,
+        "delta": delta,
+        "force_full": force_full,
+        "cache_file": cache_file,
+    }
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # OUTPUT FORMATTERS
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -751,6 +980,18 @@ Examples:
     # SYNC
     sub.add_parser("sync", help="Refresh local report")
 
+    # EXPORT-SOURCE
+    export_p = sub.add_parser("export-source", help="Fetch + normalize tasks into tasks-source.json")
+    export_p.add_argument("--input", help="Read from existing JSON file instead of Notion API")
+    export_p.add_argument("--output", default=".tmp/reports/tasks-source.json", help="Output path (default: .tmp/reports/tasks-source.json)")
+    export_p.add_argument("--database-id", default=None, help="Notion database ID (default: NOTION_DATABASE_ID env)")
+    export_p.add_argument("--page-size", type=int, default=100, help="API page size (default 100, max 100)")
+    export_p.add_argument("--max-pages", type=int, default=None, help="Max API pages to fetch (default: all)")
+    export_p.add_argument("--delta", action="store_true", help="Skip write when source fingerprint unchanged")
+    export_p.add_argument("--force-full", action="store_true", help="Ignore cache, always write")
+    export_p.add_argument("--cache-file", default=".tmp/reports/tasks-cache.json", help="Delta cache path")
+    export_p.add_argument("--exclude-status", action="append", default=["done"], help="Exclude tasks with this status (repeatable)")
+
     return parser.parse_args()
 
 
@@ -777,23 +1018,27 @@ def _err(message: str, code: str = "error") -> int:
 def main() -> int:
     args = parse_args()
 
-    try:
+    # Defer credential loading — export-source --input needs no API access.
+    client: NotionClient | None = None
+
+    def _ensure_client() -> NotionClient:
+        nonlocal client
+        if client is not None:
+            return client
         token = get_notion_token()
         database_id = get_database_id()
-    except NotionError as exc:
-        return _err(str(exc), exc.code)
-
-    client = NotionClient(token, database_id)
+        client = NotionClient(token, database_id)
+        return client
 
     try:
         if args.command == "create":
             if args.batch:
-                result = batch_create(client, args.batch)
+                result = batch_create(_ensure_client(), args.batch)
                 return _ok(result)
             if not args.name:
                 return _err("task name is required (or use --batch)", "missing_argument")
             result = create_task(
-                client,
+                _ensure_client(),
                 name=args.name,
                 project=args.project,
                 impact=args.impact,
@@ -807,7 +1052,7 @@ def main() -> int:
 
         elif args.command == "read":
             tasks = read_tasks(
-                client,
+                _ensure_client(),
                 project=args.project,
                 status=args.status,
                 priority=args.priority,
@@ -819,7 +1064,7 @@ def main() -> int:
 
         elif args.command == "update":
             if args.batch:
-                result = batch_update(client, args.batch)
+                result = batch_update(_ensure_client(), args.batch)
                 return _ok(result)
             set_fields = {}
             if args.set_status:
@@ -836,20 +1081,35 @@ def main() -> int:
                 set_fields["today"] = args.set_today
             if args.set_project:
                 set_fields["project"] = args.set_project
-            result = update_task(client, args.name_or_id, **set_fields)
+            result = update_task(_ensure_client(), args.name_or_id, **set_fields)
             return _ok({"ok": True, "operation": "update", **result})
 
         elif args.command == "delete":
             if args.batch:
-                result = batch_delete(client, args.batch)
+                result = batch_delete(_ensure_client(), args.batch)
                 return _ok(result)
             if not args.name_or_id:
                 return _err("task name or ID is required", "missing_argument")
-            result = delete_task(client, args.name_or_id, permanent=args.permanent)
+            result = delete_task(_ensure_client(), args.name_or_id, permanent=args.permanent)
             return _ok({"ok": True, "operation": "delete", **result})
 
         elif args.command == "sync":
             result = sync_tasks()
+            return _ok(result)
+
+        elif args.command == "export-source":
+            # export-source can work without credentials when --input is provided.
+            result = export_source(
+                client=_ensure_client() if not args.input else None,
+                input_file=args.input,
+                output_file=args.output,
+                cache_file=args.cache_file,
+                delta=args.delta,
+                force_full=args.force_full,
+                exclude_status=args.exclude_status,
+                page_size=args.page_size,
+                max_pages=args.max_pages,
+            )
             return _ok(result)
 
     except NotionError as exc:
