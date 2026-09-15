@@ -2,19 +2,42 @@
 
 Fast Notion task management from the command line.
 
-## Why
-
-All my knowledge lives in Obsidian — AI-powered, local-first, fast. But Notion's task management is unmatched. The problem: the Notion MCP is painfully slow (high latency per call), and the raw Notion API is verbose and UUID-dependent for every operation.
-
-So I built a thin CLI wrapper that talks directly to the Notion API. No MCP middleware, no unnecessary abstraction — just `requests` → Notion REST API.
-
 ## Job to Be Done
 
 > As someone who works with AI daily, I want to manage my Notion tasks through natural language so I can stay in my AI-powered workflow instead of context-switching to Notion's UI.
 
-All my knowledge lives in Obsidian — AI-powered, local-first, fast. But tasks live in Notion. The gap between these two tools is where productivity dies: opening a browser, navigating databases, clicking through properties. This project bridges that gap — a thin CLI layer that lets AI agents (and humans) CRUD Notion tasks without leaving the terminal. One fewer context switch. One fewer tab. One fewer interruption to deep work.
+All my knowledge lives in Obsidian — AI-powered, local-first, fast. But tasks live in Notion. The gap between these two tools is where productivity dies: opening a browser, navigating databases, clicking through properties. The Notion MCP is painfully slow (high latency per call), and the raw API is verbose and UUID-dependent for every operation.
+
+So I built a thin CLI wrapper that talks directly to the Notion API. No MCP middleware, no unnecessary abstraction — just `requests` → Notion REST API. A layer that lets AI agents (and humans) CRUD Notion tasks without leaving the terminal. One fewer context switch. One fewer tab. One fewer interruption to deep work.
 
 **The bigger picture:** this is a full-stack AI engineering problem — API design, CLI ergonomics, error handling, rate limiting, batch operations, and the glue code that connects an LLM's reasoning to a real productivity tool. The kind of work that matters when you're building AI systems that actually ship.
+
+## The Template
+
+The Notion database behind this CLI is a task management system built to run a real business — marketing, sales, operations, finance, and personal life — all in one place. [Use the template](https://1afjp.notion.site/tasks-template-f719797b8cff827097c281345e601518?source=copy_link) to get started.
+
+**Columns:**
+
+| Column | Values | Purpose |
+|--------|--------|---------|
+| Name | — | Task title |
+| Status | To Do, Doing, Quality Check, Blocked, Done | Pipeline stage |
+| Category | DW \| deep work, MTNG \| meeting - class, Task \| administrative - planning, PRSNL \| personal, GAP | Work type |
+| Impact | P1, P2, P3 | Priority level |
+| Sequence | — | Custom ordering within a project |
+| Deadline | — | Due date |
+| Project | — | Relation to project, groups tasks by initiative |
+| Assignee | — | Who's responsible |
+| Description | — | Task details |
+
+**Views:**
+
+- **Today** — checkbox to flag what you're working on today
+- **Calendar** — visual deadline tracking across all tasks
+- **Done** — completed and archived tasks
+- **Kanban per project** — drag tasks across pipeline columns (To Do → Doing → Quality Check → Blocked → Done) inside each project folder
+
+This template is what the CLI wraps. Every flag you pass maps to a real column in the database.
 
 ## Why Not Just Use the Raw API?
 
