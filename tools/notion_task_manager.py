@@ -142,11 +142,34 @@ class NotionClient:
 
     # ── Name resolution ──────────────────────────────────────────────────────
 
+    def search_by_title(self, name: str) -> list[dict[str, Any]]:
+        """Search all accessible pages for exact title match. Returns matching pages."""
+        url = f"{NOTION_API_BASE}/search"
+        payload = {"query": name, "page_size": 20}
+        data = self._request("POST", url, payload)
+        results = data.get("results", [])
+        # Filter for exact title match
+        title_key = PROPERTIES["name"]["notion_key"]
+        matched = []
+        for page in results:
+            props = page.get("properties", {})
+            # Try multiple possible title property names
+            for key in [title_key, "Name", "name"]:
+                prop = props.get(key, {})
+                if isinstance(prop, dict) and prop.get("type") == "title":
+                    title_parts = prop.get("title", [])
+                    page_title = "".join(t.get("plain_text", "") for t in title_parts).strip()
+                    if page_title.lower() == name.lower():
+                        matched.append(page)
+                    break
+        return matched
+
     def find_page_by_name(self, name: str) -> str | None:
         """Search the database for a page with matching title. Returns page_id or None."""
+        title_key = PROPERTIES["name"]["notion_key"]
         payload = {
             "filter": {
-                "property": "Name",
+                "property": title_key,
                 "title": {"equals": name}
             },
             "page_size": 1,
@@ -160,9 +183,10 @@ class NotionClient:
 
     def find_pages_by_name(self, name: str) -> list[dict[str, Any]]:
         """Search for all pages matching a title. Returns list of {id, properties}."""
+        title_key = PROPERTIES["name"]["notion_key"]
         payload = {
             "filter": {
-                "property": "Name",
+                "property": title_key,
                 "title": {"equals": name}
             },
             "page_size": 10,
@@ -187,16 +211,16 @@ class NotionClient:
         return matches[0]["id"]
 
     def resolve_project_id(self, name: str) -> str:
-        """Resolve a project name to a page_id. Raises if not found or ambiguous."""
+        """Resolve a project name to a page_id via cross-database search."""
         if _is_uuid(name):
             return name
-        matches = self.find_pages_by_name(name)
+        matches = self.search_by_title(name)
         if len(matches) == 0:
             raise NotionError(f"project '{name}' not found", "project_not_found")
         if len(matches) > 1:
             ids = [m.get("id", "?")[:8] for m in matches]
             raise NotionError(
-                f"ambiguous: {len(matches)} projects named '{name}' (IDs: {', '.join(ids)}...)",
+                f"ambiguous: {len(matches)} pages named '{name}' (IDs: {', '.join(ids)}...)",
                 "ambiguous_project"
             )
         return matches[0]["id"]
@@ -218,7 +242,8 @@ class NotionClient:
         return self._request("PATCH", f"{NOTION_API_BASE}/pages/{page_id}", payload)
 
     def archive_page(self, page_id: str) -> dict[str, Any]:
-        return self.update_page(page_id, {"archived": True})
+        payload = {"archived": True}
+        return self._request("PATCH", f"{NOTION_API_BASE}/pages/{page_id}", payload)
 
     def query_database(self, filter_obj: dict[str, Any] | None = None, sorts: list[dict] | None = None) -> list[dict[str, Any]]:
         url = f"{NOTION_API_BASE}/databases/{self.database_id}/query"
@@ -518,6 +543,7 @@ def batch_create(client: NotionClient, json_path: str) -> dict[str, Any]:
             if not name:
                 failed.append({"row": i + 1, "error": "missing 'name' field"})
                 continue
+            row.pop("name", None)
             project = row.pop("project", None)
             result = create_task(client, name, project=project, **{k: str(v) for k, v in row.items() if v is not None})
             succeeded.append({"row": i + 1, "task_id": result["task_id"]})
@@ -686,11 +712,11 @@ Examples:
 
     # CREATE
     create_p = sub.add_parser("create", help="Create a new task")
-    create_p.add_argument("name", help="Task name")
+    create_p.add_argument("name", nargs="?", default=None, help="Task name (required unless --batch)")
     create_p.add_argument("--project", help="Project name or UUID (optional)")
     create_p.add_argument("--priority", dest="impact", help="Priority: p1, p2, p3")
     create_p.add_argument("--deadline", help="Deadline: YYYY-MM-DD")
-    create_p.add_argument("--status", default=None, help="Status: today, next, later, blocked")
+    create_p.add_argument("--status", default=None, help="Status: to-do, doing, blocked, done")
     create_p.add_argument("--category", help="Category name")
     create_p.add_argument("--description", help="Task description")
     create_p.add_argument("--today", help="Set today flag: true/false")
@@ -764,6 +790,8 @@ def main() -> int:
             if args.batch:
                 result = batch_create(client, args.batch)
                 return _ok(result)
+            if not args.name:
+                return _err("task name is required (or use --batch)", "missing_argument")
             result = create_task(
                 client,
                 name=args.name,

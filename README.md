@@ -8,6 +8,14 @@ All my knowledge lives in Obsidian — AI-powered, local-first, fast. But Notion
 
 So I built a thin CLI wrapper that talks directly to the Notion API. No MCP middleware, no unnecessary abstraction — just `requests` → Notion REST API.
 
+## Job to Be Done
+
+> As someone who works with AI daily, I want to manage my Notion tasks through natural language so I can stay in my AI-powered workflow instead of context-switching to Notion's UI.
+
+All my knowledge lives in Obsidian — AI-powered, local-first, fast. But tasks live in Notion. The gap between these two tools is where productivity dies: opening a browser, navigating databases, clicking through properties. This project bridges that gap — a thin CLI layer that lets AI agents (and humans) CRUD Notion tasks without leaving the terminal. One fewer context switch. One fewer tab. One fewer interruption to deep work.
+
+**The bigger picture:** this is a full-stack AI engineering problem — API design, CLI ergonomics, error handling, rate limiting, batch operations, and the glue code that connects an LLM's reasoning to a real productivity tool. The kind of work that matters when you're building AI systems that actually ship.
+
 ## Why Not Just Use the Raw API?
 
 The raw Notion API works, but it's painful for day-to-day task management:
